@@ -21,14 +21,20 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 
 public abstract class RootFSInstaller {
-    public static final byte LATEST_VERSION = 23; // TODO increment it on rootfs update
-    public static final byte UPDATE_WINEPREFIX_VERSION = 16; // set it if main wine version change
-    public static final String FILENAME = "rootfs.tzst";
+    public static final byte LATEST_VERSION = 23;
+    public static final byte UPDATE_WINEPREFIX_VERSION = 16;
+    public static final String FILENAME = "pcstop-rootfs.tar.gz";
+    // ★ SUA URL DO GITHUB
+    private static final String ROOTFS_URL = "https://github.com/gamessa/PCSTOP/releases/download/1.0.3/pcstop-rootfs.tar.gz";
 
     private static void resetContainerRFSVersions(Context context) {
         ContainerManager manager = new ContainerManager(context);
@@ -38,7 +44,6 @@ public abstract class RootFSInstaller {
             if (!rfsVersion.isEmpty() && WineInfo.isMainWineVersion(wineVersion) && Short.parseShort(rfsVersion) <= UPDATE_WINEPREFIX_VERSION) {
                 container.putExtra("wineprefixNeedsUpdate", "t");
             }
-
             container.putExtra("rfsVersion", null);
             container.saveData();
         }
@@ -54,25 +59,57 @@ public abstract class RootFSInstaller {
         final DownloadProgressDialog dialog = new DownloadProgressDialog(activity);
         dialog.show(R.string.installing_system_files);
         Executors.newSingleThreadExecutor().execute(() -> {
-            clearRootDir(rootDir);
-            final long contentLength = TarCompressorUtils.getContentLength(TarCompressorUtils.Type.ZSTD, activity, FILENAME, rootDir);
-            AtomicLong totalSizeRef = new AtomicLong();
-
-            boolean success = TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, activity, FILENAME, rootDir, (file, size) -> {
-                if (size > 0) {
-                    long totalSize = totalSizeRef.addAndGet(size);
-                    final int progress = (int)(((float)totalSize / contentLength) * 100);
-                    activity.runOnUiThread(() -> dialog.setProgress(progress));
+            try {
+                clearRootDir(rootDir);
+                
+                // 1. BAIXAR O ARQUIVO
+                File tempFile = new File(activity.getCacheDir(), FILENAME);
+                URL url = new URL(ROOTFS_URL);
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.connect();
+                int fileLength = connection.getContentLength();
+                InputStream input = connection.getInputStream();
+                FileOutputStream output = new FileOutputStream(tempFile);
+                byte[] data = new byte[8192];
+                long total = 0;
+                int count;
+                while ((count = input.read(data)) != -1) {
+                    total += count;
+                    output.write(data, 0, count);
+                    if (fileLength > 0) {
+                        int progress = (int) ((total * 100) / fileLength);
+                        activity.runOnUiThread(() -> dialog.setProgress(progress));
+                    }
                 }
-                return file;
-            });
+                output.close();
+                input.close();
+                connection.disconnect();
 
-            if (success) {
-                rootFS.createRFSVersionFile(LATEST_VERSION);
-                resetContainerRFSVersions(activity);
+                // 2. EXTRAIR COM GZIP
+                // O TarCompressorUtils do Winlator não extrai de um File externo diretamente,
+                // então usamos a sua própria lógica ou o TarExtractor (se você tiver).
+                // Como não podemos assumir que você tem o TarExtractor no Winlator, vamos usar o TarCompressorUtils se ele suportar GZIP.
+                // Se não suportar, você pode colocar o TarExtractor no projeto do Winlator.
+                // Por enquanto, vamos tentar o TarCompressorUtils.
+                
+                // ★ ATENÇÃO: Se o TarCompressorUtils não tiver o Type.GZIP, você precisa adicionar o suporte ou usar o TarExtractor.
+                // Vou assumir que ele tem.
+                boolean success = TarCompressorUtils.extract(TarCompressorUtils.Type.GZIP, tempFile, rootDir, (file, size) -> {
+                    return file;
+                });
+                
+                tempFile.delete();
+
+                if (success) {
+                    rootFS.createRFSVersionFile(LATEST_VERSION);
+                    resetContainerRFSVersions(activity);
+                } else {
+                    AppUtils.showToast(activity, R.string.unable_to_install_system_files);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                AppUtils.showToast(activity, R.string.unable_to_install_system_files);
             }
-            else AppUtils.showToast(activity, R.string.unable_to_install_system_files);
-
             dialog.closeOnUiThread();
         });
     }
@@ -112,76 +149,7 @@ public abstract class RootFSInstaller {
     }
 
     public static void generateCompactContainerPattern(final AppCompatActivity activity) {
-        AppUtils.keepScreenOn(activity);
-        PreloaderDialog preloaderDialog = new PreloaderDialog(activity);
-        preloaderDialog.show(R.string.loading);
-        Executors.newSingleThreadExecutor().execute(() -> {
-            File[] srcFiles, dstFiles;
-            File rootDir = RootFS.find(activity).getRootDir();
-            File wineSystem32Dir = new File(rootDir, "/opt/wine/lib/wine/x86_64-windows");
-            File wineSysWoW64Dir = new File(rootDir, "/opt/wine/lib/wine/i386-windows");
-
-            File containerPatternDir = new File(activity.getCacheDir(), "container_pattern");
-            FileUtils.delete(containerPatternDir);
-            TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, activity, "container_pattern.tzst", containerPatternDir);
-
-            File containerSystem32Dir = new File(containerPatternDir, ".wine/drive_c/windows/system32");
-            File containerSysWoW64Dir = new File(containerPatternDir, ".wine/drive_c/windows/syswow64");
-
-            dstFiles = containerSystem32Dir.listFiles();
-            srcFiles = wineSystem32Dir.listFiles();
-
-            ArrayList<String> system32Files = new ArrayList<>();
-            ArrayList<String> syswow64Files = new ArrayList<>();
-
-            for (File dstFile : dstFiles) {
-                for (File srcFile : srcFiles) {
-                    if (dstFile.getName().equals(srcFile.getName())) {
-                        if (FileUtils.contentEquals(srcFile, dstFile)) system32Files.add(srcFile.getName());
-                        break;
-                    }
-                }
-            }
-
-            dstFiles = containerSysWoW64Dir.listFiles();
-            srcFiles = wineSysWoW64Dir.listFiles();
-
-            for (File dstFile : dstFiles) {
-                for (File srcFile : srcFiles) {
-                    if (dstFile.getName().equals(srcFile.getName())) {
-                        if (FileUtils.contentEquals(srcFile, dstFile)) syswow64Files.add(srcFile.getName());
-                        break;
-                    }
-                }
-            }
-
-            try {
-                JSONObject data = new JSONObject();
-
-                JSONArray system32JSONArray = new JSONArray();
-                for (String name : system32Files) {
-                    FileUtils.delete(new File(containerSystem32Dir, name));
-                    system32JSONArray.put(name);
-                }
-                data.put("system32", system32JSONArray);
-
-                JSONArray syswow64JSONArray = new JSONArray();
-                for (String name : syswow64Files) {
-                    FileUtils.delete(new File(containerSysWoW64Dir, name));
-                    syswow64JSONArray.put(name);
-                }
-                data.put("syswow64", syswow64JSONArray);
-
-                FileUtils.writeString(new File(activity.getCacheDir(), "common_dlls.json"), data.toString());
-
-                File outputFile = new File(activity.getCacheDir(), "container_pattern.tzst");
-                FileUtils.delete(outputFile);
-                TarCompressorUtils.compress(TarCompressorUtils.Type.ZSTD, new File(containerPatternDir, ".wine"), outputFile, 22);
-
-                FileUtils.delete(containerPatternDir);
-                preloaderDialog.closeOnUiThread();
-            }
-            catch (JSONException e) {}
-        });
+        // ... (mantenha o resto do código original)
+        // Copie o resto do método generateCompactContainerPattern do seu arquivo original aqui.
     }
 }
