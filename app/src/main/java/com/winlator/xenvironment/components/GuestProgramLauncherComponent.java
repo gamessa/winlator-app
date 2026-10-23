@@ -205,4 +205,4 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             }
         }
     }
-}}
+}
