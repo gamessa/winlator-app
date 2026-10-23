@@ -35,8 +35,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     public void start() {
         synchronized (lock) {
             stop();
-            extractBox64File();
-            copyDefaultBox64RCFile();
+            // extractBox64File(); // DESATIVADO: Não precisamos mais do Box64
+            // copyDefaultBox64RCFile(); // DESATIVADO
             pid = execGuestProgram();
         }
     }
@@ -88,16 +88,18 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         File rootDir = rootFS.getRootDir();
 
         EnvVars envVars = new EnvVars();
-        addBox64EnvVars(envVars);
+        // addBox64EnvVars(envVars); // DESATIVADO
         LocaleHelper.setEnvVars(envVars);
 
         envVars.put("HOME", rootDir+RootFS.HOME_PATH);
         envVars.put("USER", RootFS.USER);
         envVars.put("TMPDIR", rootDir+"/tmp");
         envVars.put("DISPLAY", ":0");
-        envVars.put("PATH", rootDir+rootFS.getWinePath()+"/bin:"+rootDir+"/usr/local/bin:"+rootDir+"/usr/bin");
+        
+        // ★ PATH CORRIGIDO: Removido o caminho do Wine, adicionado os caminhos padrão do Debian
+        envVars.put("PATH", rootDir+"/usr/local/sbin:"+rootDir+"/usr/local/bin:"+rootDir+"/usr/sbin:"+rootDir+"/usr/bin:"+rootDir+"/sbin:"+rootDir+"/bin");
+        
         envVars.put("LD_LIBRARY_PATH", rootFS.getLibDir().getPath());
-        envVars.put("BOX64_LD_LIBRARY_PATH", rootDir+"/lib/x86_64-linux-gnu");
         envVars.put("ANDROID_SYSVSHM_SERVER", rootDir+UnixSocketConfig.SYSVSHM_SERVER_PATH);
 
         if (this.envVars != null) envVars.putAll(this.envVars);
@@ -105,7 +107,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         File shmDir = new File(rootDir, "/tmp/shm");
         if (!shmDir.isDirectory()) shmDir.mkdirs();
 
-        String command = rootDir+"/usr/local/bin/box64 "+guestExecutable;
+        // ★ O NOVO COMANDO: Ignora o Box64 e roda o IceWM + Xterm direto no bash
+        String command = rootDir+"/bin/bash -c \"export DISPLAY=:0; export XDG_RUNTIME_DIR=/tmp; mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix; icewm > /tmp/icewm.log 2>&1 & xterm -e 'echo Terminal Linux rodando!; sleep 60' > /tmp/xterm.log 2>&1 & wait\"";
 
         return ProcessHelper.exec(command, envVars, rootDir, (status) -> {
             synchronized (lock) {
@@ -202,4 +205,4 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
             }
         }
     }
-}
+}}
