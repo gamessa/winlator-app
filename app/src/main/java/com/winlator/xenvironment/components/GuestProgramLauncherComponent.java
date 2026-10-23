@@ -1,208 +1,228 @@
-package com.winlator.xenvironment.components;
+package com.winlator.xenvironment;
 
 import android.content.Context;
-import android.content.SharedPreferences;
-import android.os.Process;
 
-import androidx.preference.PreferenceManager;
+import androidx.appcompat.app.AppCompatActivity;
 
-import com.winlator.box64.Box64Preset;
-import com.winlator.box64.Box64PresetManager;
-import com.winlator.core.Callback;
-import com.winlator.core.DefaultVersion;
-import com.winlator.core.EnvVars;
+import com.winlator.MainActivity;
+import com.winlator.R;
+import com.winlator.SettingsFragment;
+import com.winlator.container.Container;
+import com.winlator.container.ContainerManager;
+import com.winlator.core.AppUtils;
+import com.winlator.core.DownloadProgressDialog;
 import com.winlator.core.FileUtils;
-import com.winlator.core.GeneralComponents;
-import com.winlator.core.LocaleHelper;
-import com.winlator.core.ProcessHelper;
-import com.winlator.widget.LogView;
-import com.winlator.xconnector.UnixSocketConfig;
-import com.winlator.xenvironment.EnvironmentComponent;
-import com.winlator.xenvironment.RootFS;
+import com.winlator.core.PreloaderDialog;
+import com.winlator.core.TarCompressorUtils;
+import com.winlator.core.WineInfo;
+
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.File;
-import java.util.List;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
-public class GuestProgramLauncherComponent extends EnvironmentComponent {
-    private String guestExecutable;
-    private static int pid = -1;
-    private EnvVars envVars;
-    private String box64Preset = Box64Preset.CONSERVATIVE;
-    private Callback<Integer> terminationCallback;
-    private static final Object lock = new Object();
+public abstract class RootFSInstaller {
+    public static final byte LATEST_VERSION = 23;
+    public static final byte UPDATE_WINEPREFIX_VERSION = 16;
+    
+    // ★ NOME DO ARQUIVO E URL DO SEU DEBIAN
+    public static final String FILENAME = "pcstop-rootfs.tar.gz";
+    private static final String ROOTFS_URL = "https://github.com/gamessa/PCSTOP/releases/download/1.0.3/pcstop-rootfs.tar.gz";
 
-    @Override
-    public void start() {
-        synchronized (lock) {
-            stop();
-            // extractBox64File(); // DESATIVADO: Não precisamos mais do Box64
-            // copyDefaultBox64RCFile(); // DESATIVADO
-            pid = execGuestProgram();
+    private static void resetContainerRFSVersions(Context context) {
+        ContainerManager manager = new ContainerManager(context);
+        for (Container container : manager.getContainers()) {
+            String rfsVersion = container.getExtra("rfsVersion");
+            String wineVersion = container.getWineVersion();
+            if (!rfsVersion.isEmpty() && WineInfo.isMainWineVersion(wineVersion) && Short.parseShort(rfsVersion) <= UPDATE_WINEPREFIX_VERSION) {
+                container.putExtra("wineprefixNeedsUpdate", "t");
+            }
+            container.putExtra("rfsVersion", null);
+            container.saveData();
         }
     }
 
-    @Override
-    public void stop() {
-        synchronized (lock) {
-            if (pid != -1) {
-                Process.killProcess(pid);
-                pid = -1;
+    public static void install(final MainActivity activity) {
+        AppUtils.keepScreenOn(activity);
+        RootFS rootFS = RootFS.find(activity);
+        final File rootDir = rootFS.getRootDir();
+
+        SettingsFragment.resetPreferenceVersions(activity);
+
+        final DownloadProgressDialog dialog = new DownloadProgressDialog(activity);
+        dialog.show(R.string.installing_system_files);
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                clearRootDir(rootDir);
+                
+                // 1. BAIXAR O ARQUIVO DO GITHUB
+                File tempFile = new File(activity.getCacheDir(), FILENAME);
+                URL url = new URL(ROOTFS_URL);
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.connect();
+                int fileLength = connection.getContentLength();
+                InputStream input = connection.getInputStream();
+                FileOutputStream output = new FileOutputStream(tempFile);
+                byte[] data = new byte[8192];
+                long total = 0;
+                int count;
+                while ((count = input.read(data)) != -1) {
+                    total += count;
+                    output.write(data, 0, count);
+                    if (fileLength > 0) {
+                        int progress = (int) ((total * 100) / fileLength);
+                        activity.runOnUiThread(() -> dialog.setProgress(progress));
+                    }
+                }
+                output.close();
+                input.close();
+                connection.disconnect();
+
+                // 2. EXTRAIR USANDO O TAR DO ANDROID (Substitui o TarCompressorUtils)
+                boolean success = false;
+                try {
+                    ProcessBuilder pb = new ProcessBuilder("/system/bin/tar", "-xzf", tempFile.getAbsolutePath(), "-C", rootDir.getAbsolutePath());
+                    pb.redirectErrorStream(true);
+                    Process p = pb.start();
+                    success = (p.waitFor() == 0);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+                
+                tempFile.delete();
+
+                if (success) {
+                    rootFS.createRFSVersionFile(LATEST_VERSION);
+                    resetContainerRFSVersions(activity);
+                } else {
+                    AppUtils.showToast(activity, R.string.unable_to_install_system_files);
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+                AppUtils.showToast(activity, R.string.unable_to_install_system_files);
             }
-        }
-    }
-
-    public Callback<Integer> getTerminationCallback() {
-        return terminationCallback;
-    }
-
-    public void setTerminationCallback(Callback<Integer> terminationCallback) {
-        this.terminationCallback = terminationCallback;
-    }
-
-    public String getGuestExecutable() {
-        return guestExecutable;
-    }
-
-    public void setGuestExecutable(String guestExecutable) {
-        this.guestExecutable = guestExecutable;
-    }
-
-    public EnvVars getEnvVars() {
-        return envVars;
-    }
-
-    public void setEnvVars(EnvVars envVars) {
-        this.envVars = envVars;
-    }
-
-    public String getBox64Preset() {
-        return box64Preset;
-    }
-
-    public void setBox64Preset(String box64Preset) {
-        this.box64Preset = box64Preset;
-    }
-
-    private int execGuestProgram() {
-        RootFS rootFS = environment.getRootFS();
-        File rootDir = rootFS.getRootDir();
-
-        EnvVars envVars = new EnvVars();
-        // addBox64EnvVars(envVars); // DESATIVADO
-        LocaleHelper.setEnvVars(envVars);
-
-        envVars.put("HOME", rootDir+RootFS.HOME_PATH);
-        envVars.put("USER", RootFS.USER);
-        envVars.put("TMPDIR", rootDir+"/tmp");
-        envVars.put("DISPLAY", ":0");
-        
-        // ★ PATH CORRIGIDO: Removido o caminho do Wine, adicionado os caminhos padrão do Debian
-        envVars.put("PATH", rootDir+"/usr/local/sbin:"+rootDir+"/usr/local/bin:"+rootDir+"/usr/sbin:"+rootDir+"/usr/bin:"+rootDir+"/sbin:"+rootDir+"/bin");
-        
-        envVars.put("LD_LIBRARY_PATH", rootFS.getLibDir().getPath());
-        envVars.put("ANDROID_SYSVSHM_SERVER", rootDir+UnixSocketConfig.SYSVSHM_SERVER_PATH);
-
-        if (this.envVars != null) envVars.putAll(this.envVars);
-
-        File shmDir = new File(rootDir, "/tmp/shm");
-        if (!shmDir.isDirectory()) shmDir.mkdirs();
-
-        // ★ O NOVO COMANDO: Ignora o Box64 e roda o IceWM + Xterm direto no bash
-        String command = rootDir+"/bin/bash -c \"export DISPLAY=:0; export XDG_RUNTIME_DIR=/tmp; mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix; icewm > /tmp/icewm.log 2>&1 & xterm -e 'echo Terminal Linux rodando!; sleep 60' > /tmp/xterm.log 2>&1 & wait\"";
-
-        return ProcessHelper.exec(command, envVars, rootDir, (status) -> {
-            synchronized (lock) {
-                pid = -1;
-            }
-            if (terminationCallback != null) terminationCallback.call(status);
+            dialog.closeOnUiThread();
         });
     }
 
-    private void extractBox64File() {
-        Context context = environment.getContext();
-        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(context);
-        String box64Version = preferences.getString("box64_version", DefaultVersion.BOX64);
-        String currentBox64Version = preferences.getString("current_box64_version", "");
-
-        if (!box64Version.equals(currentBox64Version)) {
-            GeneralComponents.extractFile(GeneralComponents.Type.BOX64, context, box64Version, DefaultVersion.BOX64);
-            preferences.edit().putString("current_box64_version", box64Version).apply();
-        }
+    public static void installIfNeeded(final MainActivity activity) {
+        RootFS rootFS = RootFS.find(activity);
+        if (!rootFS.isValid() || rootFS.getVersion() < LATEST_VERSION) install(activity);
     }
 
-    private void copyDefaultBox64RCFile() {
-        Context context = environment.getContext();
-        RootFS rootFS = environment.getRootFS();
-        FileUtils.copy(context, "box64/default.box64rc", new File(rootFS.getRootDir(), "/etc/config.box64rc"));
-    }
-
-    private void addBox64EnvVars(EnvVars envVars) {
-        Context context = environment.getContext();
-        RootFS rootFS = environment.getRootFS();
-        SharedPreferences preferences = PreferenceManager.getDefaultSharedPreferences(context);
-        int box64Logs = preferences.getInt("box64_logs", 0);
-        boolean saveToFile = preferences.getBoolean("save_logs_to_file", false);
-
-        envVars.put("BOX64_NOBANNER", box64Logs >= 1 ? "0" : "1");
-        envVars.put("BOX64_DYNAREC", "1");
-        envVars.put("BOX64_UNITYPLAYER", "0");
-        envVars.put("BOX64_DYNACACHE", "0");
-
-        if (box64Logs >= 1) {
-            envVars.put("BOX64_LOG", "1");
-            envVars.put("BOX64_DYNAREC_MISSING", "1");
-
-            if (box64Logs == 2) {
-                envVars.put("BOX64_SHOWSEGV", "1");
-                envVars.put("BOX64_DLSYM_ERROR", "1");
-                envVars.put("BOX64_TRACE_FILE", "stderr");
-
-                if (saveToFile) {
-                    File parent = (new File(preferences.getString("log_file", LogView.getLogFile().getPath()))).getParentFile();
-                    if (parent != null && parent.isDirectory()) {
-                        File traceDir = new File(parent, "trace");
-                        if (!traceDir.isDirectory()) traceDir.mkdirs();
-                        FileUtils.clear(traceDir);
-
-                        envVars.put("BOX64_TRACE_FILE", traceDir+"/box64-%pid.txt");
-                    }
-                }
-            }
-        }
-
-        envVars.putAll(Box64PresetManager.getEnvVars(context, box64Preset));
-
-        File box64RCFile = new File(rootFS.getRootDir(), "/etc/config.box64rc");
-        envVars.put("BOX64_RCFILE", box64RCFile.getPath());
-    }
-
-    @Override
-    public void onPause() {
-        synchronized (lock) {
-            if (pid != -1) {
-                List<ProcessHelper.PStat> processes = ProcessHelper.getChildProcesses();
-                for (int i = processes.size()-1; i >= 0; i--) {
-                    ProcessHelper.PStat process = processes.get(i);
-                    if (process.guestProcess && process.state != ProcessHelper.PState.STOPPED) {
-                        ProcessHelper.suspendProcess(process.pid);
-                    }
-                }
+    private static void clearOptDir(File optDir) {
+        File[] files = optDir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                if (file.getName().equals("installed-wine")) continue;
+                FileUtils.delete(file);
             }
         }
     }
 
-    @Override
-    public void onResume() {
-        synchronized (lock) {
-            if (pid != -1) {
-                List<ProcessHelper.PStat> processes = ProcessHelper.getChildProcesses();
-                for (int i = 0; i < processes.size(); i++) {
-                    ProcessHelper.PStat process = processes.get(i);
-                    if (process.guestProcess && process.state == ProcessHelper.PState.STOPPED) {
-                        ProcessHelper.resumeProcess(process.pid);
+    private static void clearRootDir(File rootDir) {
+        if (rootDir.isDirectory()) {
+            File[] files = rootDir.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    if (file.isDirectory()) {
+                        String name = file.getName();
+                        if (name.equals("home") || name.equals("opt")) {
+                            if (name.equals("opt")) clearOptDir(file);
+                            continue;
+                        }
                     }
+                    FileUtils.delete(file);
                 }
             }
         }
+        else rootDir.mkdirs();
+    }
+
+    public static void generateCompactContainerPattern(final AppCompatActivity activity) {
+        // Método mantido original para evitar erros de compilação
+        AppUtils.keepScreenOn(activity);
+        PreloaderDialog preloaderDialog = new PreloaderDialog(activity);
+        preloaderDialog.show(R.string.loading);
+        Executors.newSingleThreadExecutor().execute(() -> {
+            File[] srcFiles, dstFiles;
+            File rootDir = RootFS.find(activity).getRootDir();
+            File wineSystem32Dir = new File(rootDir, "/opt/wine/lib/wine/x86_64-windows");
+            File wineSysWoW64Dir = new File(rootDir, "/opt/wine/lib/wine/i386-windows");
+
+            File containerPatternDir = new File(activity.getCacheDir(), "container_pattern");
+            FileUtils.delete(containerPatternDir);
+            TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, activity, "container_pattern.tzst", containerPatternDir);
+
+            File containerSystem32Dir = new File(containerPatternDir, ".wine/drive_c/windows/system32");
+            File containerSysWoW64Dir = new File(containerPatternDir, ".wine/drive_c/windows/syswow64");
+
+            dstFiles = containerSystem32Dir.listFiles();
+            srcFiles = wineSystem32Dir.listFiles();
+
+            ArrayList<String> system32Files = new ArrayList<>();
+            ArrayList<String> syswow64Files = new ArrayList<>();
+
+            if (dstFiles != null && srcFiles != null) {
+                for (File dstFile : dstFiles) {
+                    for (File srcFile : srcFiles) {
+                        if (dstFile.getName().equals(srcFile.getName())) {
+                            if (FileUtils.contentEquals(srcFile, dstFile)) system32Files.add(srcFile.getName());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            dstFiles = containerSysWoW64Dir.listFiles();
+            srcFiles = wineSysWoW64Dir.listFiles();
+
+            if (dstFiles != null && srcFiles != null) {
+                for (File dstFile : dstFiles) {
+                    for (File srcFile : srcFiles) {
+                        if (dstFile.getName().equals(srcFile.getName())) {
+                            if (FileUtils.contentEquals(srcFile, dstFile)) syswow64Files.add(srcFile.getName());
+                            break;
+                        }
+                    }
+                }
+            }
+
+            try {
+                JSONObject data = new JSONObject();
+
+                JSONArray system32JSONArray = new JSONArray();
+                for (String name : system32Files) {
+                    FileUtils.delete(new File(containerSystem32Dir, name));
+                    system32JSONArray.put(name);
+                }
+                data.put("system32", system32JSONArray);
+
+                JSONArray syswow64JSONArray = new JSONArray();
+                for (String name : syswow64Files) {
+                    FileUtils.delete(new File(containerSysWoW64Dir, name));
+                    syswow64JSONArray.put(name);
+                }
+                data.put("syswow64", syswow64JSONArray);
+
+                FileUtils.writeString(new File(activity.getCacheDir(), "common_dlls.json"), data.toString());
+
+                File outputFile = new File(activity.getCacheDir(), "container_pattern.tzst");
+                FileUtils.delete(outputFile);
+                TarCompressorUtils.compress(TarCompressorUtils.Type.ZSTD, new File(containerPatternDir, ".wine"), outputFile, 22);
+
+                FileUtils.delete(containerPatternDir);
+                preloaderDialog.closeOnUiThread();
+            }
+            catch (JSONException e) {}
+        });
     }
 }
