@@ -1,228 +1,62 @@
-package com.winlator.xenvironment;
+package com.winlator.xenvironment.components;
 
 import android.content.Context;
+import android.util.Log;
 
-import androidx.appcompat.app.AppCompatActivity;
-
-import com.winlator.MainActivity;
 import com.winlator.R;
-import com.winlator.SettingsFragment;
 import com.winlator.container.Container;
-import com.winlator.container.ContainerManager;
 import com.winlator.core.AppUtils;
-import com.winlator.core.DownloadProgressDialog;
 import com.winlator.core.FileUtils;
 import com.winlator.core.PreloaderDialog;
-import com.winlator.core.TarCompressorUtils;
-import com.winlator.core.WineInfo;
-
-import org.json.JSONArray;
-import org.json.JSONException;
-import org.json.JSONObject;
+import com.winlator.core.ProcessHelper;
+import com.winlator.winhandler.WinHandler;
+import com.winlator.xenvironment.EnvironmentComponent;
+import com.winlator.xserver.XServer;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.util.ArrayList;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicLong;
 
-public abstract class RootFSInstaller {
-    public static final byte LATEST_VERSION = 23;
-    public static final byte UPDATE_WINEPREFIX_VERSION = 16;
-    
-    // ★ NOME DO ARQUIVO E URL DO SEU DEBIAN
-    public static final String FILENAME = "pcstop-rootfs.tar.gz";
-    private static final String ROOTFS_URL = "https://github.com/gamessa/PCSTOP/releases/download/1.0.3/pcstop-rootfs.tar.gz";
+public class GuestProgramLauncherComponent extends EnvironmentComponent {
+    private final Container container;
+    private final XServer xServer;
+    private final PreloaderDialog preloaderDialog;
+    private WinHandler winHandler;
+    private String guestProgram;
+    private String[] arguments;
 
-    private static void resetContainerRFSVersions(Context context) {
-        ContainerManager manager = new ContainerManager(context);
-        for (Container container : manager.getContainers()) {
-            String rfsVersion = container.getExtra("rfsVersion");
-            String wineVersion = container.getWineVersion();
-            if (!rfsVersion.isEmpty() && WineInfo.isMainWineVersion(wineVersion) && Short.parseShort(rfsVersion) <= UPDATE_WINEPREFIX_VERSION) {
-                container.putExtra("wineprefixNeedsUpdate", "t");
-            }
-            container.putExtra("rfsVersion", null);
-            container.saveData();
+    public GuestProgramLauncherComponent(Container container, XServer xServer, PreloaderDialog preloaderDialog) {
+        this.container = container;
+        this.xServer = xServer;
+        this.preloaderDialog = preloaderDialog;
+    }
+
+    public void setGuestProgram(String guestProgram, String[] arguments) {
+        this.guestProgram = guestProgram;
+        this.arguments = arguments;
+    }
+
+    public WinHandler getWinHandler() {
+        return winHandler;
+    }
+
+    @Override
+    public void start() {
+        if (winHandler != null) return;
+
+        winHandler = new WinHandler(container);
+        winHandler.start();
+
+        // Aqui o Winlator original inicializa as variáveis de ambiente
+        // e executa o programa (Wine/Box64). 
+        // Como você está adaptando o projeto, o código de execução
+        // deve ser o mesmo que você já tinha, apenas sem a classe 
+        // RootFSInstaller colada no final.
+    }
+
+    @Override
+    public void stop() {
+        if (winHandler != null) {
+            winHandler.stop();
+            winHandler = null;
         }
-    }
-
-    public static void install(final MainActivity activity) {
-        AppUtils.keepScreenOn(activity);
-        RootFS rootFS = RootFS.find(activity);
-        final File rootDir = rootFS.getRootDir();
-
-        SettingsFragment.resetPreferenceVersions(activity);
-
-        final DownloadProgressDialog dialog = new DownloadProgressDialog(activity);
-        dialog.show(R.string.installing_system_files);
-        Executors.newSingleThreadExecutor().execute(() -> {
-            try {
-                clearRootDir(rootDir);
-                
-                // 1. BAIXAR O ARQUIVO DO GITHUB
-                File tempFile = new File(activity.getCacheDir(), FILENAME);
-                URL url = new URL(ROOTFS_URL);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                connection.connect();
-                int fileLength = connection.getContentLength();
-                InputStream input = connection.getInputStream();
-                FileOutputStream output = new FileOutputStream(tempFile);
-                byte[] data = new byte[8192];
-                long total = 0;
-                int count;
-                while ((count = input.read(data)) != -1) {
-                    total += count;
-                    output.write(data, 0, count);
-                    if (fileLength > 0) {
-                        int progress = (int) ((total * 100) / fileLength);
-                        activity.runOnUiThread(() -> dialog.setProgress(progress));
-                    }
-                }
-                output.close();
-                input.close();
-                connection.disconnect();
-
-                // 2. EXTRAIR USANDO O TAR DO ANDROID (Substitui o TarCompressorUtils)
-                boolean success = false;
-                try {
-                    ProcessBuilder pb = new ProcessBuilder("/system/bin/tar", "-xzf", tempFile.getAbsolutePath(), "-C", rootDir.getAbsolutePath());
-                    pb.redirectErrorStream(true);
-                    Process p = pb.start();
-                    success = (p.waitFor() == 0);
-                } catch (Exception e) {
-                    e.printStackTrace();
-                }
-                
-                tempFile.delete();
-
-                if (success) {
-                    rootFS.createRFSVersionFile(LATEST_VERSION);
-                    resetContainerRFSVersions(activity);
-                } else {
-                    AppUtils.showToast(activity, R.string.unable_to_install_system_files);
-                }
-            } catch (Exception e) {
-                e.printStackTrace();
-                AppUtils.showToast(activity, R.string.unable_to_install_system_files);
-            }
-            dialog.closeOnUiThread();
-        });
-    }
-
-    public static void installIfNeeded(final MainActivity activity) {
-        RootFS rootFS = RootFS.find(activity);
-        if (!rootFS.isValid() || rootFS.getVersion() < LATEST_VERSION) install(activity);
-    }
-
-    private static void clearOptDir(File optDir) {
-        File[] files = optDir.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (file.getName().equals("installed-wine")) continue;
-                FileUtils.delete(file);
-            }
-        }
-    }
-
-    private static void clearRootDir(File rootDir) {
-        if (rootDir.isDirectory()) {
-            File[] files = rootDir.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    if (file.isDirectory()) {
-                        String name = file.getName();
-                        if (name.equals("home") || name.equals("opt")) {
-                            if (name.equals("opt")) clearOptDir(file);
-                            continue;
-                        }
-                    }
-                    FileUtils.delete(file);
-                }
-            }
-        }
-        else rootDir.mkdirs();
-    }
-
-    public static void generateCompactContainerPattern(final AppCompatActivity activity) {
-        // Método mantido original para evitar erros de compilação
-        AppUtils.keepScreenOn(activity);
-        PreloaderDialog preloaderDialog = new PreloaderDialog(activity);
-        preloaderDialog.show(R.string.loading);
-        Executors.newSingleThreadExecutor().execute(() -> {
-            File[] srcFiles, dstFiles;
-            File rootDir = RootFS.find(activity).getRootDir();
-            File wineSystem32Dir = new File(rootDir, "/opt/wine/lib/wine/x86_64-windows");
-            File wineSysWoW64Dir = new File(rootDir, "/opt/wine/lib/wine/i386-windows");
-
-            File containerPatternDir = new File(activity.getCacheDir(), "container_pattern");
-            FileUtils.delete(containerPatternDir);
-            TarCompressorUtils.extract(TarCompressorUtils.Type.ZSTD, activity, "container_pattern.tzst", containerPatternDir);
-
-            File containerSystem32Dir = new File(containerPatternDir, ".wine/drive_c/windows/system32");
-            File containerSysWoW64Dir = new File(containerPatternDir, ".wine/drive_c/windows/syswow64");
-
-            dstFiles = containerSystem32Dir.listFiles();
-            srcFiles = wineSystem32Dir.listFiles();
-
-            ArrayList<String> system32Files = new ArrayList<>();
-            ArrayList<String> syswow64Files = new ArrayList<>();
-
-            if (dstFiles != null && srcFiles != null) {
-                for (File dstFile : dstFiles) {
-                    for (File srcFile : srcFiles) {
-                        if (dstFile.getName().equals(srcFile.getName())) {
-                            if (FileUtils.contentEquals(srcFile, dstFile)) system32Files.add(srcFile.getName());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            dstFiles = containerSysWoW64Dir.listFiles();
-            srcFiles = wineSysWoW64Dir.listFiles();
-
-            if (dstFiles != null && srcFiles != null) {
-                for (File dstFile : dstFiles) {
-                    for (File srcFile : srcFiles) {
-                        if (dstFile.getName().equals(srcFile.getName())) {
-                            if (FileUtils.contentEquals(srcFile, dstFile)) syswow64Files.add(srcFile.getName());
-                            break;
-                        }
-                    }
-                }
-            }
-
-            try {
-                JSONObject data = new JSONObject();
-
-                JSONArray system32JSONArray = new JSONArray();
-                for (String name : system32Files) {
-                    FileUtils.delete(new File(containerSystem32Dir, name));
-                    system32JSONArray.put(name);
-                }
-                data.put("system32", system32JSONArray);
-
-                JSONArray syswow64JSONArray = new JSONArray();
-                for (String name : syswow64Files) {
-                    FileUtils.delete(new File(containerSysWoW64Dir, name));
-                    syswow64JSONArray.put(name);
-                }
-                data.put("syswow64", syswow64JSONArray);
-
-                FileUtils.writeString(new File(activity.getCacheDir(), "common_dlls.json"), data.toString());
-
-                File outputFile = new File(activity.getCacheDir(), "container_pattern.tzst");
-                FileUtils.delete(outputFile);
-                TarCompressorUtils.compress(TarCompressorUtils.Type.ZSTD, new File(containerPatternDir, ".wine"), outputFile, 22);
-
-                FileUtils.delete(containerPatternDir);
-                preloaderDialog.closeOnUiThread();
-            }
-            catch (JSONException e) {}
-        });
     }
 }
