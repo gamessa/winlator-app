@@ -24,6 +24,8 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     private String guestProgram;
     private String[] arguments;
     private String envVars = "";
+    private String box64Preset = "STABILITY"; // Valor padrão
+    private String cpuList = "";
     private TerminationCallback terminationCallback;
 
     public interface TerminationCallback {
@@ -49,6 +51,21 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         this.envVars = envVars;
     }
 
+    // Método que faltava para o Box64 (versão String)
+    public void setBox64Preset(String preset) {
+        this.box64Preset = preset;
+    }
+
+    // Método que faltava para o Box64 (versão short)
+    public void setBox64Preset(short preset) {
+        this.box64Preset = String.valueOf(preset);
+    }
+
+    // Método para configurar a lista de CPUs
+    public void setCPUList(String cpuList) {
+        this.cpuList = cpuList;
+    }
+
     public void setTerminationCallback(TerminationCallback callback) {
         this.terminationCallback = callback;
     }
@@ -64,18 +81,7 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         winHandler = new WinHandler(container);
         winHandler.start();
 
-        // Monta o comando para rodar o programa no container
-        String command = guestProgram;
-        if (arguments != null && arguments.length > 0) {
-            for (String arg : arguments) {
-                command += " " + arg;
-            }
-        }
-
-        // Aqui você pode ajustar a lógica de inicialização do processo.
-        // O código original do Winlator usa o ProcessHelper, mas como você
-        // está adaptando o projeto, a lógica de execução fica a seu critério.
-        Log.d("GuestProgramLauncher", "Iniciando: " + command);
+        Log.d("GuestProgramLauncher", "Iniciando: " + guestProgram + " com Box64 Preset: " + box64Preset);
     }
 
     @Override
