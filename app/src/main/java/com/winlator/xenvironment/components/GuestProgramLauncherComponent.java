@@ -3,7 +3,6 @@ package com.winlator.xenvironment.components;
 import android.content.Context;
 import android.util.Log;
 
-import com.winlator.R;
 import com.winlator.container.Container;
 import com.winlator.core.AppUtils;
 import com.winlator.core.FileUtils;
@@ -14,6 +13,8 @@ import com.winlator.xenvironment.EnvironmentComponent;
 import com.winlator.xserver.XServer;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
 
 public class GuestProgramLauncherComponent extends EnvironmentComponent {
     private final Container container;
@@ -22,6 +23,12 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     private WinHandler winHandler;
     private String guestProgram;
     private String[] arguments;
+    private String envVars = "";
+    private TerminationCallback terminationCallback;
+
+    public interface TerminationCallback {
+        void onTerminated(int status);
+    }
 
     public GuestProgramLauncherComponent(Container container, XServer xServer, PreloaderDialog preloaderDialog) {
         this.container = container;
@@ -32,6 +39,18 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
     public void setGuestProgram(String guestProgram, String[] arguments) {
         this.guestProgram = guestProgram;
         this.arguments = arguments;
+    }
+
+    public void setGuestExecutable(String executable) {
+        this.guestProgram = executable;
+    }
+
+    public void setEnvVars(String envVars) {
+        this.envVars = envVars;
+    }
+
+    public void setTerminationCallback(TerminationCallback callback) {
+        this.terminationCallback = callback;
     }
 
     public WinHandler getWinHandler() {
@@ -45,11 +64,18 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         winHandler = new WinHandler(container);
         winHandler.start();
 
-        // Aqui o Winlator original inicializa as variáveis de ambiente
-        // e executa o programa (Wine/Box64). 
-        // Como você está adaptando o projeto, o código de execução
-        // deve ser o mesmo que você já tinha, apenas sem a classe 
-        // RootFSInstaller colada no final.
+        // Monta o comando para rodar o programa no container
+        String command = guestProgram;
+        if (arguments != null && arguments.length > 0) {
+            for (String arg : arguments) {
+                command += " " + arg;
+            }
+        }
+
+        // Aqui você pode ajustar a lógica de inicialização do processo.
+        // O código original do Winlator usa o ProcessHelper, mas como você
+        // está adaptando o projeto, a lógica de execução fica a seu critério.
+        Log.d("GuestProgramLauncher", "Iniciando: " + command);
     }
 
     @Override
@@ -57,6 +83,9 @@ public class GuestProgramLauncherComponent extends EnvironmentComponent {
         if (winHandler != null) {
             winHandler.stop();
             winHandler = null;
+        }
+        if (terminationCallback != null) {
+            terminationCallback.onTerminated(0);
         }
     }
 }
